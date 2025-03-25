@@ -12,6 +12,7 @@ const usage =
     \\\\  weekly                  Summarize touchpoints for a week
     \\\\  follow-ups              List upcoming follow-ups
     \\\\  staff-summary           Summarize touchpoints by staff
+    \\\\  scholar-summary         Summarize touchpoints by scholar
     \\\\
     \\\\Global options:
     \\\\  --dry-run               Print SQL instead of executing
@@ -40,6 +41,11 @@ const usage =
     \\\\  --until <date>          Window end date (YYYY-MM-DD, default current_date)
     \\\\  --days <n>              Window size in days (default 30)
     \\\\  --limit <n>             Result limit (default 10)
+    \\\\
+    \\\\scholar-summary options:
+    \\\\  --until <date>          Window end date (YYYY-MM-DD, default current_date)
+    \\\\  --days <n>              Window size in days (default 90)
+    \\\\  --limit <n>             Result limit (default 20)
     \\\\
     \\\\Environment:
     \\\\  GS_TOUCHPOINT_DB_URL    Production Postgres connection URL
@@ -101,6 +107,8 @@ pub fn main() !void {
         try runFollowups(allocator, &parsed);
     } else if (std.mem.eql(u8, cmd, "staff-summary")) {
         try runStaffSummary(allocator, &parsed);
+    } else if (std.mem.eql(u8, cmd, "scholar-summary")) {
+        try runScholarSummary(allocator, &parsed);
     } else {
         try std.io.getStdErr().writer().print("Unknown command: {s}\n\n", .{cmd});
         try printUsage();
@@ -270,6 +278,27 @@ fn runStaffSummary(allocator: std.mem.Allocator, parsed: *ParsedArgs) !void {
     try runPsqlCommand(allocator, db_url, sql);
 }
 
+fn runScholarSummary(allocator: std.mem.Allocator, parsed: *ParsedArgs) !void {
+    const until = parsed.options.get("until") orelse "current_date";
+    const days_raw = parsed.options.get("days") orelse "90";
+    const days = try requireNumeric(days_raw);
+    const limit_raw = parsed.options.get("limit") orelse "20";
+    const limit = try requireNumeric(limit_raw);
+
+    const sql = try buildScholarSummarySql(allocator, until, days, limit);
+    defer allocator.free(sql);
+
+    if (parsed.dry_run) {
+        try std.io.getStdOut().writer().print("{s}\n", .{sql});
+        return;
+    }
+
+    const db_url = try getDbUrl(allocator);
+    defer allocator.free(db_url);
+
+    try runPsqlCommand(allocator, db_url, sql);
+}
+
 fn getDbUrl(allocator: std.mem.Allocator) ![]u8 {
     return std.process.getEnvVarOwned(allocator, "GS_TOUCHPOINT_DB_URL");
 }
@@ -407,6 +436,17 @@ fn buildStaffSummarySql(allocator: std.mem.Allocator, until: []const u8, days: [
     );
 }
 
+fn buildScholarSummarySql(allocator: std.mem.Allocator, until: []const u8, days: []const u8, limit: []const u8) ![]u8 {
+    const until_expr = try sqlDateExpression(allocator, until);
+    defer allocator.free(until_expr);
+
+    return std.fmt.allocPrint(
+        allocator,
+        "WITH window AS (SELECT * FROM touchpoint_ledger.touchpoints WHERE occurred_at::date >= {s} - interval '{s} days' AND occurred_at::date <= {s}) SELECT scholar_name, scholar_identifier, count(*) AS touches, max(occurred_at)::date AS last_touch, min(follow_up_date) FILTER (WHERE follow_up_date IS NOT NULL AND follow_up_date >= {s}) AS next_follow_up FROM window GROUP BY scholar_name, scholar_identifier ORDER BY touches DESC, last_touch DESC LIMIT {s};",
+        .{ until_expr, days, until_expr, until_expr, limit },
+    );
+}
+
 fn sqlStringLiteral(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
     var buffer = std.ArrayList(u8).empty;
     errdefer buffer.deinit(allocator);
@@ -503,6 +543,16 @@ test "buildStaffSummarySql uses interval and limit" {
 
     try std.testing.expect(std.mem.indexOf(u8, out, "interval '30 days'") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "LIMIT 5") != null);
+}
+
+test "buildScholarSummarySql uses next follow up filter and limit" {
+    const allocator = std.testing.allocator;
+    const out = try buildScholarSummarySql(allocator, "current_date", "90", "12");
+    defer allocator.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "next_follow_up") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "interval '90 days'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "LIMIT 12") != null);
 }
 
 test "requireNumeric rejects non-digits" {

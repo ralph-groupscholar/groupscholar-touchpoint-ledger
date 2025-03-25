@@ -8,3 +8,4 @@
 - Added follow-up reporting command with numeric input validation and tests.
 - Rewrote the README with real CLI usage and database instructions.
 - Added staff-summary command with configurable window, limits, and SQL tests.
+- Added scholar-summary command for per-scholar touchpoint totals, last touch, and next follow-up reporting.
