@@ -13,6 +13,8 @@ const usage =
     \\\\  follow-ups              List upcoming follow-ups
     \\\\  staff-summary           Summarize touchpoints by staff
     \\\\  scholar-summary         Summarize touchpoints by scholar
+    \\\\  gap-report              Show scholars overdue for touchpoints
+    \\\\  trend                   Weekly touchpoint volume trend
     \\\\
     \\\\Global options:
     \\\\  --dry-run               Print SQL instead of executing
@@ -46,6 +48,15 @@ const usage =
     \\\\  --until <date>          Window end date (YYYY-MM-DD, default current_date)
     \\\\  --days <n>              Window size in days (default 90)
     \\\\  --limit <n>             Result limit (default 20)
+    \\\\
+    \\\\gap-report options:
+    \\\\  --as-of <date>          Report date (YYYY-MM-DD, default current_date)
+    \\\\  --days <n>              Gap threshold in days (default 30)
+    \\\\  --limit <n>             Result limit (default 20)
+    \\\\
+    \\\\trend options:
+    \\\\  --as-of <date>          Report date (YYYY-MM-DD, default current_date)
+    \\\\  --weeks <n>             Number of weeks to include (default 8)
     \\\\
     \\\\Environment:
     \\\\  GS_TOUCHPOINT_DB_URL    Production Postgres connection URL
@@ -109,6 +120,10 @@ pub fn main() !void {
         try runStaffSummary(allocator, &parsed);
     } else if (std.mem.eql(u8, cmd, "scholar-summary")) {
         try runScholarSummary(allocator, &parsed);
+    } else if (std.mem.eql(u8, cmd, "gap-report")) {
+        try runGapReport(allocator, &parsed);
+    } else if (std.mem.eql(u8, cmd, "trend")) {
+        try runTrend(allocator, &parsed);
     } else {
         try std.io.getStdErr().writer().print("Unknown command: {s}\n\n", .{cmd});
         try printUsage();
@@ -299,6 +314,46 @@ fn runScholarSummary(allocator: std.mem.Allocator, parsed: *ParsedArgs) !void {
     try runPsqlCommand(allocator, db_url, sql);
 }
 
+fn runGapReport(allocator: std.mem.Allocator, parsed: *ParsedArgs) !void {
+    const as_of = parsed.options.get("as-of") orelse "current_date";
+    const days_raw = parsed.options.get("days") orelse "30";
+    const days = try requireNumeric(days_raw);
+    const limit_raw = parsed.options.get("limit") orelse "20";
+    const limit = try requireNumeric(limit_raw);
+
+    const sql = try buildGapReportSql(allocator, as_of, days, limit);
+    defer allocator.free(sql);
+
+    if (parsed.dry_run) {
+        try std.io.getStdOut().writer().print("{s}\n", .{sql});
+        return;
+    }
+
+    const db_url = try getDbUrl(allocator);
+    defer allocator.free(db_url);
+
+    try runPsqlCommand(allocator, db_url, sql);
+}
+
+fn runTrend(allocator: std.mem.Allocator, parsed: *ParsedArgs) !void {
+    const as_of = parsed.options.get("as-of") orelse "current_date";
+    const weeks_raw = parsed.options.get("weeks") orelse "8";
+    const weeks = try requireNumeric(weeks_raw);
+
+    const sql = try buildTrendSql(allocator, as_of, weeks);
+    defer allocator.free(sql);
+
+    if (parsed.dry_run) {
+        try std.io.getStdOut().writer().print("{s}\n", .{sql});
+        return;
+    }
+
+    const db_url = try getDbUrl(allocator);
+    defer allocator.free(db_url);
+
+    try runPsqlCommand(allocator, db_url, sql);
+}
+
 fn getDbUrl(allocator: std.mem.Allocator) ![]u8 {
     return std.process.getEnvVarOwned(allocator, "GS_TOUCHPOINT_DB_URL");
 }
@@ -447,6 +502,28 @@ fn buildScholarSummarySql(allocator: std.mem.Allocator, until: []const u8, days:
     );
 }
 
+fn buildGapReportSql(allocator: std.mem.Allocator, as_of: []const u8, days: []const u8, limit: []const u8) ![]u8 {
+    const as_of_expr = try sqlDateExpression(allocator, as_of);
+    defer allocator.free(as_of_expr);
+
+    return std.fmt.allocPrint(
+        allocator,
+        "WITH latest AS (SELECT DISTINCT ON (scholar_name) scholar_name, scholar_identifier, staff_name, channel, occurred_at::date AS last_touch FROM touchpoint_ledger.touchpoints ORDER BY scholar_name, occurred_at DESC) SELECT scholar_name, scholar_identifier, staff_name, channel, last_touch, ({s} - last_touch) AS days_since FROM latest WHERE last_touch <= {s} - interval '{s} days' ORDER BY last_touch ASC LIMIT {s};",
+        .{ as_of_expr, as_of_expr, days, limit },
+    );
+}
+
+fn buildTrendSql(allocator: std.mem.Allocator, as_of: []const u8, weeks: []const u8) ![]u8 {
+    const as_of_expr = try sqlDateExpression(allocator, as_of);
+    defer allocator.free(as_of_expr);
+
+    return std.fmt.allocPrint(
+        allocator,
+        "WITH anchor AS (SELECT date_trunc('week', {s})::date AS week_start), series AS (SELECT (anchor.week_start - (interval '1 week' * n))::date AS week_start FROM anchor, generate_series(0, {s} - 1) AS n) SELECT series.week_start, count(t.*) AS touches, count(*) FILTER (WHERE t.follow_up_date IS NOT NULL AND t.follow_up_date <= series.week_start + interval '7 days') AS follow_ups_due FROM series LEFT JOIN touchpoint_ledger.touchpoints t ON t.occurred_at >= series.week_start AND t.occurred_at < series.week_start + interval '7 days' GROUP BY series.week_start ORDER BY series.week_start ASC;",
+        .{ as_of_expr, weeks },
+    );
+}
+
 fn sqlStringLiteral(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
     var buffer = std.ArrayList(u8).empty;
     errdefer buffer.deinit(allocator);
@@ -553,6 +630,25 @@ test "buildScholarSummarySql uses next follow up filter and limit" {
     try std.testing.expect(std.mem.indexOf(u8, out, "next_follow_up") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "interval '90 days'") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "LIMIT 12") != null);
+}
+
+test "buildGapReportSql uses as_of and interval" {
+    const allocator = std.testing.allocator;
+    const out = try buildGapReportSql(allocator, "current_date", "45", "15");
+    defer allocator.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "current_date - last_touch") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "interval '45 days'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "LIMIT 15") != null);
+}
+
+test "buildTrendSql uses generate_series and weeks" {
+    const allocator = std.testing.allocator;
+    const out = try buildTrendSql(allocator, "current_date", "6");
+    defer allocator.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "generate_series(0, 6 - 1)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "date_trunc('week'") != null);
 }
 
 test "requireNumeric rejects non-digits" {

@@ -17,3 +17,6 @@ CREATE INDEX IF NOT EXISTS touchpoint_ledger_touchpoints_occurred_at_idx
 
 CREATE INDEX IF NOT EXISTS touchpoint_ledger_touchpoints_follow_up_idx
   ON touchpoint_ledger.touchpoints (follow_up_date);
+
+CREATE INDEX IF NOT EXISTS touchpoint_ledger_touchpoints_scholar_latest_idx
+  ON touchpoint_ledger.touchpoints (scholar_name, occurred_at DESC);

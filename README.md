@@ -9,6 +9,8 @@ Command-line ledger for logging scholar touchpoints, reviewing recent outreach, 
 - Upcoming follow-up window reporting.
 - Staff activity summaries for recent touchpoints.
 - Scholar activity summaries for recent touchpoints.
+- Gap reporting for scholars overdue on touchpoints.
+- Weekly touchpoint trend snapshots.
 - Production-only schema and seed data scripts.
 
 ## Commands
@@ -22,6 +24,8 @@ zig build run -- weekly --week-start 2026-02-02
 zig build run -- follow-ups --since current_date --days 14
 zig build run -- staff-summary --until current_date --days 30 --limit 10
 zig build run -- scholar-summary --until current_date --days 90 --limit 20
+zig build run -- gap-report --as-of current_date --days 30 --limit 20
+zig build run -- trend --as-of current_date --weeks 8
 ```
 
 ## Configuration
